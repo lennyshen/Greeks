@@ -43,6 +43,18 @@ streamlit run Option_Dashboard.py
 
 ### Streamlit Cloud部署
 
+> ⚠️ **重要提示**: 由于东方财富网限制海外IP访问，Streamlit Cloud（服务器在美国）可能无法获取数据。建议使用以下替代方案：
+
+**替代方案1: 本地运行** (推荐)
+```bash
+streamlit run Option_Dashboard.py
+```
+
+**替代方案2: 国内云服务器部署**
+- 阿里云、腾讯云等国内服务器
+- 使用Docker部署
+
+**替代方案3: 使用Streamlit Cloud** (可能无法获取数据)
 1. Fork本仓库到你的GitHub账号
 2. 登录 [Streamlit Cloud](https://streamlit.io/cloud)
 3. 点击 "New app" 并选择你的仓库

@@ -38,26 +38,164 @@ ETF_UNDERLYING = {
 }
 
 
-@st.cache_data(ttl=60)  # 缓存60秒
+@st.cache_data(ttl=300, show_spinner=False)  # 缓存5分钟
 def get_option_risk_data():
-    """获取期权风险分析数据"""
+    """获取期权风险分析数据，支持多数据源"""
+    
+    # 方案1: 尝试东方财富接口
     try:
         df = ak.option_risk_analysis_em()
-        return df
+        if df is not None and not df.empty:
+            return df
     except Exception as e:
-        st.error(f"获取期权数据失败: {e}")
-        return pd.DataFrame()
+        pass  # 东方财富失败，尝试新浪
+    
+    # 方案2: 尝试新浪接口（需要先获取合约列表）
+    try:
+        st.info("🔄 正在尝试备用数据源（新浪财经）...")
+        return get_option_data_from_sina()
+    except Exception as e:
+        pass
+    
+    # 两个数据源都失败
+    st.error("❌ 无法获取期权数据")
+    with st.expander("🔍 查看可能的原因和解决方案"):
+        st.markdown("""
+        **可能的原因：**
+        1. 东方财富网和新浪财经可能都限制了海外IP访问
+        2. Streamlit Cloud服务器在美国，可能被数据源阻止
+        3. 数据源API接口暂时不可用
+        
+        **解决方案：**
+        1. 建议使用本地部署或国内云服务器运行
+        2. 稍后重试，数据源可能临时维护
+        """)
+    return pd.DataFrame()
 
 
-@st.cache_data(ttl=60)
+def get_option_data_from_sina():
+    """从新浪财经获取期权数据（备用方案）"""
+    import time
+    
+    all_data = []
+    
+    # 获取所有ETF期权的合约月份
+    etf_underlyings = ["510050", "510300", "510500", "588000", "588080"]
+    
+    for underlying in etf_underlyings:
+        try:
+            # 获取当前可用的合约月份
+            # 使用当前月份和下几个月
+            from datetime import datetime
+            current_date = datetime.now()
+            
+            for month_offset in range(4):  # 获取4个月的合约
+                target_month = current_date.month + month_offset
+                target_year = current_date.year
+                if target_month > 12:
+                    target_month -= 12
+                    target_year += 1
+                
+                trade_date = f"{target_year}{target_month:02d}"
+                
+                try:
+                    # 获取该月份的合约代码
+                    codes_df = ak.option_sse_codes_sina(trade_date=trade_date, underlying=underlying)
+                    if codes_df is None or codes_df.empty:
+                        continue
+                    
+                    # 获取每个合约的Greeks
+                    for _, row in codes_df.iterrows():
+                        try:
+                            code = str(row.get('期权代码', row.get('合约代码', '')))
+                            if not code:
+                                continue
+                            
+                            greeks_df = ak.option_sse_greeks_sina(symbol=code)
+                            if greeks_df is None or greeks_df.empty:
+                                continue
+                            
+                            # 转换为字典格式
+                            greeks_dict = dict(zip(greeks_df['字段'], greeks_df['值']))
+                            
+                            option_data = {
+                                '期权代码': code,
+                                '期权名称': greeks_dict.get('期权合约简称', ''),
+                                '最新价': float(greeks_dict.get('最新价', 0) or 0),
+                                '涨跌幅': 0,  # 新浪接口可能没有涨跌幅
+                                '杠杆比率': 0,
+                                '实际杠杆比率': 0,
+                                'Delta': float(greeks_dict.get('Delta', 0) or 0),
+                                'Gamma': float(greeks_dict.get('Gamma', 0) or 0),
+                                'Vega': float(greeks_dict.get('Vega', 0) or 0),
+                                'Rho': 0,
+                                'Theta': float(greeks_dict.get('Theta', 0) or 0),
+                                '到期日': None,
+                            }
+                            all_data.append(option_data)
+                            
+                            # 添加小延迟避免请求过快
+                            time.sleep(0.1)
+                            
+                        except Exception:
+                            continue
+                            
+                except Exception:
+                    continue
+                    
+        except Exception:
+            continue
+    
+    if not all_data:
+        raise Exception("新浪数据源也无法获取数据")
+    
+    return pd.DataFrame(all_data)
+
+
+@st.cache_data(ttl=300, show_spinner=False)  # 缓存5分钟
 def get_etf_price(symbol):
     """获取ETF实时价格"""
     try:
         spot_price_df = ak.option_sse_underlying_spot_price_sina(symbol=symbol)
+        if spot_price_df is None or spot_price_df.empty:
+            return None
         current_price = float(spot_price_df.loc[spot_price_df['字段'] == '最近成交价', '值'].iloc[0])
         return current_price
     except Exception as e:
+        # 静默失败，不显示错误（因为会有多次调用）
         return None
+
+
+def check_data_source_status():
+    """检查数据源是否可用，返回可用的数据源名称"""
+    import requests
+    
+    sources = []
+    
+    # 检查东方财富
+    try:
+        response = requests.get(
+            "https://push2.eastmoney.com/api/qt/clist/get",
+            timeout=5,
+            params={"fs": "m:10", "pn": "1", "pz": "1"}
+        )
+        if response.status_code == 200 and response.json().get("data"):
+            sources.append("东方财富")
+    except:
+        pass
+    
+    # 检查新浪
+    try:
+        response = requests.get(
+            "https://stock.finance.sina.com.cn/option/quotes.html",
+            timeout=5
+        )
+        if response.status_code == 200:
+            sources.append("新浪财经")
+    except:
+        pass
+    
+    return sources
 
 
 def identify_etf_type(option_name):
@@ -224,6 +362,15 @@ if 'positions' not in st.session_state:
 
 # 侧边栏 - 添加持仓
 st.sidebar.header("📋 添加持仓")
+
+# 数据源状态检测
+with st.sidebar.container():
+    available_sources = check_data_source_status()
+    if available_sources:
+        st.sidebar.success(f"✅ 可用数据源: {', '.join(available_sources)}")
+    else:
+        st.sidebar.error("❌ 所有数据源连接失败")
+        st.sidebar.caption("可能是海外IP被限制访问")
 
 # 刷新数据按钮
 if st.sidebar.button("🔄 刷新期权数据"):
